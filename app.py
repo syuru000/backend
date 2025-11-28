@@ -3,15 +3,12 @@ from flask import Flask, request
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
 # Import the refactored game logic
-from ksh_game import GameState, PIECE_FEN_MAP
+from ksh_game import GameState
 
 app = Flask(__name__)
-# In a real app, use a more secure, environment-variable-based secret key
 app.config['SECRET_KEY'] = 'a_very_secret_key_that_should_be_changed'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# Dictionary to store game sessions
-# game_sessions = { 'game_id': {'game': GameState(), 'players': [sid1, sid2]} }
 game_sessions = {}
 
 def get_game_state_for_frontend(game_state):
@@ -28,10 +25,8 @@ def get_game_state_for_frontend(game_state):
                         is_deactivated = True
 
                 row_for_frontend.append({
-                    "team": piece.team,
-                    "name": piece.name,
-                    "korean_name": piece.korean_name,
-                    "position": piece.position,
+                    "team": piece.team, "name": piece.name,
+                    "korean_name": piece.korean_name, "position": piece.position,
                     "is_deactivated": is_deactivated,
                 })
             else:
@@ -47,9 +42,15 @@ def get_game_state_for_frontend(game_state):
         "deactivated_groups": game_state.deactivated_groups,
         "in_check_team": game_state.in_check_team,
         "checked_su_pos": game_state.checked_su_pos,
+        "selected_pos": game_state.selected_pos, # Add selected_pos to payload
         "fen": game_state.generate_fen()
     }
 
+def get_player_team(sid, session):
+    for team, player_sid in session['players'].items():
+        if player_sid == sid:
+            return team
+    return None
 
 @app.route('/')
 def index():
@@ -58,131 +59,101 @@ def index():
 @socketio.on('connect')
 def on_connect():
     print(f'Client connected: {request.sid}')
-    emit('my response', {'data': 'Connected to KSH backend'})
 
 @socketio.on('disconnect')
 def on_disconnect():
     print(f'Client disconnected: {request.sid}')
-    # Find which game the disconnected player was in and notify the other player
-    game_id_to_remove = None
+    game_id_to_cleanup = None
     for game_id, session in game_sessions.items():
-        if request.sid in session['players']:
-            session['players'].remove(request.sid)
-            if len(session['players']) == 0:
-                game_id_to_remove = game_id
+        disconnected_team = get_player_team(request.sid, session)
+        if disconnected_team:
+            session['players'][disconnected_team] = None
+            other_team = '한' if disconnected_team == '초' else '초'
+            remaining_player_sid = session['players'].get(other_team)
+            if remaining_player_sid:
+                emit('player_disconnected', {'message': '상대방의 연결이 끊어졌습니다.'}, room=remaining_player_sid)
             else:
-                # Notify remaining player
-                emit('player_disconnected', {'message': 'The other player has disconnected.'}, room=session['players'][0])
+                game_id_to_cleanup = game_id
             break
-    if game_id_to_remove:
-        del game_sessions[game_id_to_remove]
-        print(f"Removed empty game session: {game_id_to_remove}")
-
+    if game_id_to_cleanup:
+        del game_sessions[game_id_to_cleanup]
+        print(f"Removed empty game session: {game_id_to_cleanup}")
 
 @socketio.on('create_game')
 def on_create_game():
-    """Creates a new game session."""
     player_sid = request.sid
-    game_id = str(uuid.uuid4().hex)[:6] # Short, unique ID
+    game_id = str(uuid.uuid4().hex)[:6]
     game = GameState()
-    
     game_sessions[game_id] = {
         'game': game,
-        'players': [player_sid]
+        'players': {'초': player_sid, '한': None}
     }
-    
     join_room(game_id)
-    print(f"Player {player_sid} created and joined game {game_id}")
-    
+    print(f"Player {player_sid} created game {game_id} as team '초'")
     emit('game_created', {'game_id': game_id})
     emit('update_state', get_game_state_for_frontend(game))
 
-
 @socketio.on('join_game')
 def on_join_game(data):
-    """Allows a second player to join a game."""
     player_sid = request.sid
     game_id = data.get('game_id')
-    
     if game_id not in game_sessions:
-        emit('error', {'message': 'Game not found.'})
+        emit('error', {'message': '해당 ID의 게임을 찾을 수 없습니다.'})
         return
-        
     session = game_sessions[game_id]
-    
-    if len(session['players']) >= 2:
-        emit('error', {'message': 'This game is already full.'})
+    if session['players']['한'] is not None:
+        emit('error', {'message': '이 게임은 이미 가득 찼습니다.'})
         return
-    
-    if player_sid in session['players']:
-        emit('error', {'message': 'You are already in this game.'})
+    if session['players']['초'] == player_sid:
+        emit('error', {'message': '자기 자신과는 플레이할 수 없습니다.'})
         return
-
-    session['players'].append(player_sid)
+    session['players']['한'] = player_sid
     join_room(game_id)
-    
-    print(f"Player {player_sid} joined game {game_id}")
-    
-    # Notify both players that the game is starting
-    emit('game_started', {'message': 'Both players are connected. The game begins!'}, room=game_id)
-    
-    # Send the current state to everyone in the room
+    print(f"Player {player_sid} joined game {game_id} as team '한'")
+    emit('game_started', {'message': '양쪽 플레이어가 모두 연결되었습니다. 게임을 시작합니다!'}, room=game_id)
     emit('update_state', get_game_state_for_frontend(session['game']), room=game_id)
 
-
-@socketio.on('make_move')
-def on_make_move(data):
-    """Handles a player's move."""
+@socketio.on('handle_click')
+def on_handle_click(data):
+    """Handles any click on the board from a player."""
     player_sid = request.sid
     game_id = data.get('game_id')
-    from_pos = tuple(data.get('from_pos'))
-    to_pos = tuple(data.get('to_pos'))
-
-    if game_id not in game_sessions:
-        emit('error', {'message': 'Game not found.'})
-        return
-        
+    
+    if game_id not in game_sessions: return
     session = game_sessions[game_id]
     game = session['game']
-    
-    # Determine player team by their order in the list ('초' is first, '한' is second)
-    try:
-        player_index = session['players'].index(player_sid)
-        player_team = '초' if player_index == 0 else '한'
-    except ValueError:
-        emit('error', {'message': 'You are not a player in this game.'})
+
+    if not all(session['players'].values()):
+        emit('error', {'message': '상대방이 아직 참가하지 않았습니다.'})
+        return
+
+    player_team = get_player_team(player_sid, session)
+    if not player_team:
+        emit('error', {'message': '게임의 플레이어가 아닙니다.'})
         return
 
     if game.current_turn != player_team:
-        emit('error', {'message': 'Not your turn.'})
+        # Allow deselecting even if it's not your turn
+        if game.selected_pos:
+             game.handle_click(data.get('pos'))
+             emit('update_state', get_game_state_for_frontend(game), room=game_id)
+        else:
+             emit('error', {'message': '자신의 턴이 아닙니다.'})
         return
         
     if game.game_over:
-        emit('error', {'message': 'The game is already over.'})
+        emit('error', {'message': '게임이 이미 종료되었습니다.'})
         return
 
-    # --- Perform the move using the game logic ---
-    # 1. Select the piece
-    game.select_piece(from_pos)
-    
-    # 2. Check if the destination is a valid move for the selected piece
-    if to_pos in game.valid_moves:
-        # If valid, the second select_piece call will trigger move_piece internally
-        game.select_piece(to_pos)
-        
-        # Broadcast the new state to all players in the game room
-        emit('update_state', get_game_state_for_frontend(game), room=game_id)
-        
-        if game.game_over:
-            emit('game_over', {'winner': game.winner}, room=game.id)
-    else:
-        # If the move is invalid, just send an error to the player who tried
-        game.selected_piece = None
-        game.valid_moves = []
-        emit('error', {'message': 'Invalid move.'})
-        # Also send the current state back to them to reset their selection
-        emit('update_state', get_game_state_for_frontend(game))
+    # Process the click using the unified game logic
+    pos = tuple(data.get('pos'))
+    game.handle_click(pos)
 
+    # Broadcast the new state to all players
+    emit('update_state', get_game_state_for_frontend(game), room=game_id)
+    
+    if game.game_over:
+        emit('game_over', {'winner': game.winner}, room=game_id)
 
 if __name__ == '__main__':
     print("Starting KSH Game Backend Server...")

@@ -83,7 +83,7 @@ class Cha(Piece):
                 ny += dy
                 nx += dx
         
-        palace_keys_to_check = ['초', '초_좌', '초_우','한', '한_좌', '한_우'] if self.team == '초' else ['초', '초_좌', '초_우','한', '한_좌', '한_우']
+        palace_keys_to_check = ['초', '초_좌', '초_우','한', '한_좌', '한_우']
         for key in palace_keys_to_check:
             if not game_state.is_in_palace(self.position, self.team, check_palace_key=key): continue
             y1, x1, y2, x2 = game_state.palaces[key]
@@ -358,7 +358,7 @@ class Hu(Piece):
         for move in potential_moves:
             if not game_state.is_in_outer_outer_area(move, self.team):
                 moves.append(move)
-        palace_keys_to_check = ['초', '초_좌', '초_우','한', '한_좌', '한_우'] if self.team == '초' else ['초', '초_좌', '초_우','한', '한_좌', '한_우']
+        palace_keys_to_check = ['초', '초_좌', '초_우','한', '한_좌', '한_우']
         for key in palace_keys_to_check:
             if not game_state.is_in_palace(self.position, self.team, check_palace_key=key): continue
             y1, x1, y2, x2 = game_state.palaces[key]
@@ -411,7 +411,7 @@ class GameState:
     def _initialize_game_variables(self, fen):
         self.board_state = self.parse_fen(fen)
         self.current_turn = '초'
-        self.selected_piece = None
+        self.selected_pos = None # Replaces selected_piece
         self.valid_moves = []
         self.game_over = False
         self.winner = None
@@ -438,8 +438,13 @@ class GameState:
                 if x >= self.BOARD_WIDTH_CELLS: break
                 char = row_str[i]
                 if char.isdigit():
-                    x += int(char)
-                    i += 1
+                    num_str = ""
+                    j = i
+                    while j < len(row_str) and row_str[j].isdigit():
+                        num_str += row_str[j]
+                        j += 1
+                    x += int(num_str)
+                    i = j
                 else:
                     team = '한' if char.isupper() else '초'
                     piece_class = PIECE_CLASS_MAP.get(char.lower())
@@ -462,8 +467,13 @@ class GameState:
                     if x >= self.BOARD_WIDTH_CELLS: break
                     char = row_str[i]
                     if char.isdigit():
-                        x += int(char)
-                        i += 1
+                        num_str = ""
+                        j = i
+                        while j < len(row_str) and row_str[j].isdigit():
+                            num_str += row_str[j]
+                            j += 1
+                        x += int(num_str)
+                        i = j
                     else:
                         if board[y][x]: board[y][x].has_moved = True if char == 'm' else False
                         x += 1
@@ -478,8 +488,13 @@ class GameState:
                     if x >= self.BOARD_WIDTH_CELLS: break
                     char = row_str[i]
                     if char.isdigit():
-                        x += int(char)
-                        i += 1
+                        num_str = ""
+                        j = i
+                        while j < len(row_str) and row_str[j].isdigit():
+                            num_str += row_str[j]
+                            j += 1
+                        x += int(num_str)
+                        i = j
                     else:
                         if board[y][x]:
                             if char == 'L': board[y][x].general_group = '좌'
@@ -488,7 +503,7 @@ class GameState:
                         x += 1
                         i += 1
         return board
-
+        
     def generate_fen(self):
         piece_rows, moved_rows, group_rows = [], [], []
         for r in range(self.BOARD_HEIGHT_CELLS):
@@ -518,6 +533,51 @@ class GameState:
             group_rows.append(row_group)
         return f"{'/'.join(piece_rows)}|{'/'.join(moved_rows)}|{'/'.join(group_rows)}"
 
+    def handle_click(self, pos):
+        """A single method to handle any click, either selecting or moving."""
+        if self.game_over: return
+        y, x = pos
+        
+        # If a piece is selected and the new pos is a valid move, then move the piece
+        if self.selected_pos and (y, x) in self.valid_moves:
+            self.move_piece(self.selected_pos, (y, x))
+            return
+
+        target_piece = self.board_state[y][x]
+
+        # Deselect if clicking the same piece or an invalid square
+        if (self.selected_pos == (y,x)) or not target_piece or (target_piece.team != self.current_turn):
+            self.selected_pos = None
+            self.valid_moves = []
+            return
+
+        # If clicking a valid piece of the current turn
+        group_key = f"{target_piece.team}_{target_piece.general_group}"
+        if target_piece.general_group != '중앙' and target_piece.name != 'Su' and self.deactivated_groups.get(group_key, False):
+            self.selected_pos = None
+            self.valid_moves = []
+            return
+
+        self.selected_pos = (y,x)
+        piece_to_check = self.board_state[y][x]
+        
+        potential_moves = piece_to_check.get_valid_moves(self.board_state, self)
+        
+        truly_valid_moves = []
+        for move in potential_moves:
+            import copy
+            temp_board_state = copy.deepcopy(self.board_state)
+            
+            from_pos_temp = self.selected_pos
+            temp_board_state[move[0]][move[1]] = temp_board_state[from_pos_temp[0]][from_pos_temp[1]]
+            temp_board_state[from_pos_temp[0]][from_pos_temp[1]] = None
+
+            in_check, _ = self.is_su_in_check(self.current_turn, temp_board_state)
+            if not in_check:
+                truly_valid_moves.append(move)
+        
+        self.valid_moves = truly_valid_moves
+
     def is_in_inner_area(self, pos, team):
         y, x = pos
         y1, x1, y2, x2 = self.inner_area[team]
@@ -542,19 +602,38 @@ class GameState:
         y, x = pos
         palace_keys_to_check = [check_palace_key] if check_palace_key else []
         if not palace_keys_to_check:
-            palace_keys_to_check = [team]
+            palace_keys_to_check.append(team)
             if not check_main_palace_only:
                 palace_keys_to_check.extend([f"{team}_좌", f"{team}_우"])
+        
+        # A bit of a hack, but Cha and Hu can move along any palace lines
+        if self.selected_pos:
+             piece = self.board_state[self.selected_pos[0]][self.selected_pos[1]]
+             if piece and piece.name in ['Cha', 'Hu']:
+                 palace_keys_to_check.extend(['초', '한', '초_좌', '초_우', '한_좌', '한_우'])
+                 palace_keys_to_check = list(set(palace_keys_to_check))
+
+
         for key in palace_keys_to_check:
+            if key not in self.palaces: continue
             y1, x1, y2, x2 = self.palaces[key]
             if y1 <= y <= y2 and x1 <= x <= x2: return True
         return False
 
     def is_valid_palace_diagonal_move(self, r1, c1, r2, c2, team):
         current_pos, new_pos = (r1, c1), (r2, c2)
-        relevant_palace_keys = [team, f"{team}_좌", f"{team}_우"]
-        for key in relevant_palace_keys:
-            if not self.is_in_palace(current_pos, team, check_palace_key=key) or not self.is_in_palace(new_pos, team, check_palace_key=key): continue
+        
+        all_palace_keys = ['초', '한', '초_좌', '초_우', '한_좌', '한_우']
+        
+        for key in all_palace_keys:
+            # Check if both current_pos and new_pos are in THIS specific palace
+            y1, x1, y2, x2 = self.palaces[key]
+            current_in = y1 <= current_pos[0] <= y2 and x1 <= current_pos[1] <= x2
+            new_in = y1 <= new_pos[0] <= y2 and x1 <= new_pos[1] <= x2
+
+            if not (current_in and new_in):
+                continue 
+
             valid_segments = self.palace_diagonal_paths[key]
             if (current_pos, new_pos) in valid_segments: return True
         return False
@@ -564,10 +643,17 @@ class GameState:
             for c in range(self.BOARD_WIDTH_CELLS):
                 piece = board_state[r][c]
                 if piece and piece.team == attacking_team:
+                    # Temporarily set selected_pos for context-dependent moves (like Cha in palace)
+                    original_selected_pos = self.selected_pos
+                    self.selected_pos = (r, c)
+                    
                     attack_moves = []
                     if piece.name in ['Su', 'Jang']: attack_moves = piece._get_base_moves(board_state, self)
                     elif piece.name == 'Bok': attack_moves = piece._get_attack_range(board_state)
                     else: attack_moves = piece.get_valid_moves(board_state, self)
+                    
+                    self.selected_pos = original_selected_pos # Restore
+                    
                     if square in attack_moves: return True
         return False
 
@@ -584,40 +670,6 @@ class GameState:
         attacking_team = '한' if team == '초' else '초'
         if self.is_square_under_attack(su_pos, attacking_team, board_state): return True, su_pos
         return False, None
-
-    def select_piece(self, pos):
-        if self.game_over: return
-        y, x = pos
-        target_piece = self.board_state[y][x]
-        if self.selected_piece and (y, x) in self.valid_moves:
-            from_pos = self.selected_piece.position
-            self.move_piece(from_pos, (y, x))
-            return
-        if self.selected_piece and self.selected_piece.position == (y, x):
-            self.selected_piece = None
-            self.valid_moves = []
-            return
-        if target_piece and target_piece.team == self.current_turn:
-            group_key = f"{target_piece.team}_{target_piece.general_group}"
-            if target_piece.general_group != '중앙' and target_piece.name != 'Su' and self.deactivated_groups.get(group_key, False):
-                self.selected_piece = None
-                self.valid_moves = []
-                return
-            self.selected_piece = target_piece
-            potential_moves = target_piece.get_valid_moves(self.board_state, self)
-            truly_valid_moves = []
-            for move in potential_moves:
-                import copy
-                temp_board_state = copy.deepcopy(self.board_state)
-                temp_board_state[move[0]][move[1]] = temp_board_state[self.selected_piece.position[0]][self.selected_piece.position[1]]
-                temp_board_state[self.selected_piece.position[0]][self.selected_piece.position[1]] = None
-                in_check, _ = self.is_su_in_check(self.current_turn, temp_board_state)
-                if not in_check:
-                    truly_valid_moves.append(move)
-            self.valid_moves = truly_valid_moves
-        else:
-            self.selected_piece = None
-            self.valid_moves = []
 
     def move_piece(self, from_pos, to_pos):
         from_y, from_x = from_pos
@@ -653,7 +705,8 @@ class GameState:
         }
         self.move_history.append(move_data)
         
-        self.selected_piece = None
+        # Clear selection state after move
+        self.selected_pos = None
         self.valid_moves = []
         self.in_check_team = None
         self.checked_su_pos = None
