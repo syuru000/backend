@@ -352,32 +352,31 @@ class Jeon(Piece):
 class Hu(Piece):
     korean_name = '후'
     def get_valid_moves(self, board_state, game_state):
+        # 1. Get all potential moves as if it were a Cha.
         potential_moves = Cha.get_valid_moves(self, board_state, game_state)
+        
         moves = []
-        if game_state.is_in_outer_outer_area(self.position, self.team): return []
+        opponent_team = '한' if self.team == '초' else '초'
+
+        # Hu cannot move if it starts in the "outer-outer" area.
+        if game_state.is_in_outer_outer_area(self.position, self.team):
+            return []
+
+        # 2. Filter the potential moves based on Hu's specific restrictions.
         for move in potential_moves:
-            if not game_state.is_in_outer_outer_area(move, self.team):
+            # Restricted areas Hu cannot enter:
+            # 1. Its own "outer-outer" area.
+            is_outside_allowed_zone = game_state.is_in_outer_outer_area(move, self.team)
+            # 2. The opponent's main palace.
+            is_opponent_main_palace = game_state.is_in_palace(move, opponent_team, check_main_palace_only=True)
+            # 3. The opponent's inner area.
+            is_opponent_inner_area = game_state.is_in_inner_area(move, opponent_team)
+
+            # If the move is not into any of the restricted zones, it's valid.
+            if not (is_outside_allowed_zone or is_opponent_main_palace or is_opponent_inner_area):
                 moves.append(move)
-        palace_keys_to_check = ['초', '초_좌', '초_우','한', '한_좌', '한_우']
-        for key in palace_keys_to_check:
-            if not game_state.is_in_palace(self.position, self.team, check_palace_key=key): continue
-            y1, x1, y2, x2 = game_state.palaces[key]
-            cy, cx = (y1 + y2) // 2, (x1 + x2) // 2
-            diagonal_paths = [[(y1, x1), (cy, cx), (y2, x2)], [(y1, x2), (cy, cx), (y2, x1)]]
-            for path in diagonal_paths:
-                if self.position in path:
-                    current_idx = path.index(self.position)
-                    for i in range(current_idx + 1, len(path)):
-                        target_pos = path[i]
-                        if any(board_state[path[j][0]][path[j][1]] is not None for j in range(current_idx + 1, i)): break
-                        if self._is_valid_target(target_pos, board_state, game_state): moves.append(target_pos)
-                        if board_state[target_pos[0]][target_pos[1]] is not None: break
-                    for i in range(current_idx - 1, -1, -1):
-                        target_pos = path[i]
-                        if any(board_state[path[j][0]][path[j][1]] is not None for j in range(current_idx - 1, i, -1)): break
-                        if self._is_valid_target(target_pos, board_state, game_state): moves.append(target_pos)
-                        if board_state[target_pos[0]][target_pos[1]] is not None: break
-        return moves
+                
+        return list(set(moves)) # Use set to remove any duplicate moves
 
 PIECE_CLASS_MAP = {'K': Su, 'Q': Jang, 'R': Cha, 'C': Po, 'N': Ma, 'E': Sang, 'A': Sa, 'P': Bo, 'G': Gi, 'M': Bok, 'U': Yu, 'L': Gi_L, 'F': Jeon, 'B': Hu, 'k': Su, 'q': Jang, 'r': Cha, 'c': Po, 'n': Ma, 'e': Sang, 'a': Sa, 'p': Bo, 'g': Gi, 'm': Bok, 'u': Yu, 'l': Gi_L, 'f': Jeon, 'b': Hu}
 PIECE_FEN_MAP = {'Su': 'k', 'Jang': 'q', 'Cha': 'r', 'Po': 'c', 'Ma': 'n', 'Sang': 'e', 'Sa': 'a', 'Bo': 'p', 'Gi': 'g', 'Bok': 'm', 'Yu': 'u', 'Gi_L': 'l', 'Jeon': 'f', 'Hu': 'b'}
@@ -607,7 +606,7 @@ class GameState:
                 palace_keys_to_check.extend([f"{team}_좌", f"{team}_우"])
         
         # A bit of a hack, but Cha and Hu can move along any palace lines
-        if self.selected_pos:
+        if self.selected_pos and not check_main_palace_only:
              piece = self.board_state[self.selected_pos[0]][self.selected_pos[1]]
              if piece and piece.name in ['Cha', 'Hu']:
                  palace_keys_to_check.extend(['초', '한', '초_좌', '초_우', '한_좌', '한_우'])

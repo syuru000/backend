@@ -118,16 +118,40 @@ def on_handle_click(data):
     """Handles any click on the board from a player."""
     player_sid = request.sid
     game_id = data.get('game_id')
-    
-    if game_id not in game_sessions: return
+    pos = tuple(data.get('pos'))
+
+    if game_id not in game_sessions:
+        print(f"[DEBUG] Invalid game_id: {game_id}")
+        return
     session = game_sessions[game_id]
     game = session['game']
+
+    player_team = get_player_team(player_sid, session)
+
+    # --- Server-side Coordinate Transformation ---
+    logical_pos = pos
+    if player_team == '한':
+        BOARD_HEIGHT = 14
+        BOARD_WIDTH = 15
+        logical_pos = (BOARD_HEIGHT - 1 - pos[0], BOARD_WIDTH - 1 - pos[1])
+    # ---
+
+    # --- Start of Debugging Prints ---
+    clicked_piece = game.board_state[logical_pos[0]][logical_pos[1]]
+    print("="*20)
+    print(f"[DEBUG] Click received for game {game_id}")
+    print(f"  - Player SID: {player_sid}")
+    print(f"  - Player Team: {player_team}")
+    print(f"  - Current Turn: {game.current_turn}")
+    print(f"  - Visual Clicked Position (from client): {pos}")
+    print(f"  - Logical Position (after transform): {logical_pos}")
+    print(f"  - Clicked Piece: {clicked_piece.name if clicked_piece else 'None'} (Team: {clicked_piece.team if clicked_piece else 'N/A'})")
+    # --- End of Debugging Prints ---
 
     if not all(session['players'].values()):
         emit('error', {'message': '상대방이 아직 참가하지 않았습니다.'})
         return
 
-    player_team = get_player_team(player_sid, session)
     if not player_team:
         emit('error', {'message': '게임의 플레이어가 아닙니다.'})
         return
@@ -135,23 +159,23 @@ def on_handle_click(data):
     if game.current_turn != player_team:
         # Allow deselecting even if it's not your turn
         if game.selected_pos:
-             game.handle_click(data.get('pos'))
+             game.handle_click(logical_pos) # Use logical_pos
              emit('update_state', get_game_state_for_frontend(game), room=game_id)
         else:
-             emit('error', {'message': '자신의 턴이 아닙니다.'})
+             # emit('error', {'message': '자신의 턴이 아닙니다.'}) # Suppress error for clarity during debug
+             print(f"[DEBUG] Denied click: Not player's turn.")
         return
-        
+
     if game.game_over:
         emit('error', {'message': '게임이 이미 종료되었습니다.'})
         return
 
     # Process the click using the unified game logic
-    pos = tuple(data.get('pos'))
-    game.handle_click(pos)
+    game.handle_click(logical_pos) # Use logical_pos
 
     # Broadcast the new state to all players
     emit('update_state', get_game_state_for_frontend(game), room=game_id)
-    
+
     if game.game_over:
         emit('game_over', {'winner': game.winner}, room=game_id)
 
